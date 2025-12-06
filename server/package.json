@@ -1,0 +1,31 @@
+{
+    "name": "plasma-apollo-server",
+    "version": "1.0.0",
+    "description": "Backend for AI Linear Operations Agent",
+    "main": "src/app.ts",
+    "scripts": {
+        "dev": "tsx watch src/app.ts",
+        "build": "tsc",
+        "start": "node dist/app.js"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "@linear/sdk": "^34.0.0",
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.5",
+        "express": "^4.21.0",
+        "graphql": "^16.8.1",
+        "multer": "^1.4.5-lts.1",
+        "openai": "^4.63.0"
+    },
+    "devDependencies": {
+        "@types/cors": "^2.8.17",
+        "@types/express": "^5.0.0",
+        "@types/multer": "^1.4.12",
+        "@types/node": "^22.5.5",
+        "tsx": "^4.19.1",
+        "typescript": "^5.6.2"
+    }
+}
