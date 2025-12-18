@@ -4,8 +4,11 @@ export type AgentActionType =
     | 'deleteIssue'
     | 'createProject'
     | 'createRoadmap'
+    | 'readIssue'
+    | 'searchIssues'
     | 'readProject'
     | 'readRoadmap'
+    | 'message'
     | 'error';
 
 export interface AgentActionPayload {
@@ -35,4 +38,3 @@ export interface ApiResponse {
     results?: BatchItem[]; // For batch uploads
     status?: 'pending' | 'success' | 'failed';
 }
-

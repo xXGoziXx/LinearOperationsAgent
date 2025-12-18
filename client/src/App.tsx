@@ -76,11 +76,11 @@ function App() {
         </div>
       </header>
 
-      {/* Main Content Info Grid */}
+        {/* Main Content Info Grid */}
       <main className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-140px)]">
 
         {/* Left Column: Chat */}
-        <div className="lg:col-span-2 h-full">
+        <div className="lg:col-span-2 h-full min-h-0">
           <ChatInterface onActionReceived={setLatestAction} selectedTeamId={selectedTeamId} />
         </div>
 

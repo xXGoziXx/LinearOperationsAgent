@@ -9,6 +9,9 @@ import {
     RoadmapCreateInput,
     toLinearState,
     LinearIssueResponse,
+    LinearIssueDetails,
+    LinearIssueSearchResponse,
+    LinearIssueSearchHit,
     LinearProjectResponse,
     LinearSuccessResponse,
     TeamMetadata
@@ -47,6 +50,18 @@ const MOCK_ROADMAP = { id: 'mock-road-1', name: 'Mock Roadmap' };
 const metadataCache = new Map<string, { data: TeamMetadata; expires: number }>();
 const milestoneCache = new Map<string, { data: Array<{ id: string; name: string }>; expires: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 mins
+
+function isUuid(value: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim());
+}
+
+function extractIssueIdentifierFromText(value: string): string | undefined {
+    const match =
+        value.match(/\b([A-Z][A-Z0-9]+-\d+)\b/i) ||
+        value.match(/linear\.app\/[^/]+\/issue\/([A-Z][A-Z0-9]+-\d+)\b/i);
+    if (!match) return undefined;
+    return match[1].toUpperCase();
+}
 
 /**
  * Linear label groups allow ONLY ONE child label to be applied per group.
@@ -572,25 +587,50 @@ export const updateIssue = async (input: IssueUpdateInput, apiKey?: string): Pro
             (input as any).phase ||
             undefined;
 
-        const titleStrippedDescription =
-            typeof title === 'string' && typeof description === 'string'
-                ? stripTitleFromDescription(title, description)
-                : description;
-        const { phase, description: withoutPhaseDescription } = extractPhaseAndStripFromDescription(titleStrippedDescription);
-        const normalizedPriority = normalizeIssuePriority(priority, withoutPhaseDescription, milestoneHint || phase);
+        const currentDescription = issue.description ?? undefined;
+        const nextTitle = typeof title === 'string' ? title : undefined;
+        const nextDescription = typeof description === 'string' ? description : undefined;
+        const wantsDescriptionUpdate = nextDescription !== undefined && nextDescription !== currentDescription;
 
-        const updatePayload: Record<string, unknown> = {
-            title,
-            description: titleStrippedDescription,
-            priority: normalizedPriority,
-            projectId,
-            projectMilestoneId,
-            cycleId,
-            labelIds,
-            assigneeId,
-            stateId,
-            state
+        const titleForDescription =
+            typeof nextTitle === 'string'
+                ? nextTitle
+                : (typeof issue.title === 'string' ? issue.title : undefined);
+        const titleStrippedDescription =
+            wantsDescriptionUpdate && typeof titleForDescription === 'string' && typeof nextDescription === 'string'
+                ? stripTitleFromDescription(titleForDescription, nextDescription)
+                : nextDescription;
+        const { phase, description: withoutPhaseDescription } = wantsDescriptionUpdate
+            ? extractPhaseAndStripFromDescription(titleStrippedDescription)
+            : { phase: undefined, description: titleStrippedDescription };
+
+        const normalizedPriority =
+            priority !== undefined || wantsDescriptionUpdate
+                ? normalizeIssuePriority(priority, withoutPhaseDescription, milestoneHint || phase)
+                : undefined;
+
+        const sameStringArray = (a: unknown, b: unknown): boolean => {
+            if (!Array.isArray(a) || !Array.isArray(b)) return false;
+            const aa = a.filter((v): v is string => typeof v === 'string').slice().sort();
+            const bb = b.filter((v): v is string => typeof v === 'string').slice().sort();
+            if (aa.length !== bb.length) return false;
+            for (let i = 0; i < aa.length; i++) if (aa[i] !== bb[i]) return false;
+            return true;
         };
+
+        const updatePayload: Record<string, unknown> = {};
+        if (typeof nextTitle === 'string' && nextTitle !== issue.title) updatePayload.title = nextTitle;
+        if (wantsDescriptionUpdate) updatePayload.description = titleStrippedDescription;
+        if (normalizedPriority !== undefined && normalizedPriority !== issue.priority) updatePayload.priority = normalizedPriority;
+        if (typeof projectId === 'string' && projectId !== issue.projectId) updatePayload.projectId = projectId;
+        if (typeof projectMilestoneId === 'string' && projectMilestoneId !== issue.projectMilestoneId) {
+            updatePayload.projectMilestoneId = projectMilestoneId;
+        }
+        if (typeof cycleId === 'string' && cycleId !== issue.cycleId) updatePayload.cycleId = cycleId;
+        if (labelIds !== undefined && !sameStringArray(labelIds, issue.labelIds)) updatePayload.labelIds = labelIds;
+        if (assigneeId !== undefined && assigneeId !== issue.assigneeId) updatePayload.assigneeId = assigneeId;
+        if (stateId !== undefined && stateId !== issue.stateId) updatePayload.stateId = stateId;
+        if (state !== undefined) updatePayload.state = state;
 
         const effectiveProjectId = (typeof projectId === 'string' && projectId) || issue.projectId;
         let resolvedProjectMilestoneId: string | undefined =
@@ -599,20 +639,25 @@ export const updateIssue = async (input: IssueUpdateInput, apiKey?: string): Pro
         if (resolvedProjectMilestoneId && !effectiveProjectId) {
             console.warn('[Linear] Dropping projectMilestoneId because projectId is missing.');
             resolvedProjectMilestoneId = undefined;
-            updatePayload.projectMilestoneId = undefined;
+            delete updatePayload.projectMilestoneId;
         }
 
         const milestoneHintResolved =
             typeof milestoneHint === 'string' && milestoneHint.trim().length > 0 ? milestoneHint : phase;
 
-        if (!resolvedProjectMilestoneId && effectiveProjectId && typeof milestoneHintResolved === 'string' && milestoneHintResolved.trim().length > 0) {
+        if (
+            !resolvedProjectMilestoneId &&
+            effectiveProjectId &&
+            typeof milestoneHintResolved === 'string' &&
+            milestoneHintResolved.trim().length > 0
+        ) {
             try {
                 const milestones = await getProjectMilestones(effectiveProjectId, { apiKey });
                 const match = findProjectMilestoneMatch(milestones, milestoneHintResolved);
                 if (match) {
                     updatePayload.projectMilestoneId = match.id;
                     // Linear requires the issue to be in the project for milestone assignment.
-                    if (!updatePayload.projectId) updatePayload.projectId = effectiveProjectId;
+                    if (!updatePayload.projectId && !issue.projectId) updatePayload.projectId = effectiveProjectId;
                 }
             } catch (e) {
                 // If milestone lookup fails, proceed without it.
@@ -620,7 +665,7 @@ export const updateIssue = async (input: IssueUpdateInput, apiKey?: string): Pro
         }
 
         // Remove the Phase line only if a milestone is set/resolved.
-        if (updatePayload.projectMilestoneId && typeof withoutPhaseDescription === 'string') {
+        if (updatePayload.projectMilestoneId && wantsDescriptionUpdate && typeof withoutPhaseDescription === 'string') {
             updatePayload.description = withoutPhaseDescription;
         }
 
@@ -646,6 +691,16 @@ export const updateIssue = async (input: IssueUpdateInput, apiKey?: string): Pro
             } catch (e) {
                 // If metadata lookup fails, proceed without label group enforcement.
             }
+        }
+
+        if (Object.keys(updatePayload).length === 0) {
+            return {
+                success: true,
+                id: issue.id,
+                title: issue.title,
+                identifier: issue.identifier,
+                url: issue.url
+            };
         }
 
         const response = await issue.update(updatePayload);
@@ -678,12 +733,136 @@ export const getIssue = async (id: string, apiKey?: string) => {
     return safeExecute(
         async () => {
             const client = getLinearClient(apiKey);
-            const result = await client.issue(id);
-            return result as unknown as { id: string; title: string; description?: string; success: true };
+            const issue = await client.issue(id);
+            return {
+                success: true,
+                id: issue.id,
+                identifier: issue.identifier,
+                title: issue.title,
+                description: issue.description,
+                url: issue.url,
+                priority: issue.priority,
+                priorityLabel: issue.priorityLabel,
+                labelIds: issue.labelIds,
+                assigneeId: issue.assigneeId,
+                stateId: issue.stateId,
+                cycleId: issue.cycleId,
+                projectId: issue.projectId,
+                projectMilestoneId: issue.projectMilestoneId,
+                teamId: issue.teamId
+            } satisfies LinearIssueDetails;
         },
-        { id, title: 'Mock Issue', description: 'Mock Description', success: true },
+        {
+            success: true,
+            id,
+            identifier: 'MOCK-1',
+            title: 'Mock Issue',
+            description: 'Mock Description',
+            url: 'http://localhost/mock',
+            priority: 3,
+            priorityLabel: 'Normal',
+            labelIds: ['mock-label-bug'],
+            assigneeId: undefined,
+            stateId: 'mock-state-backlog',
+            cycleId: undefined,
+            projectId: undefined,
+            projectMilestoneId: undefined,
+            teamId: 'mock-team-id'
+        } satisfies LinearIssueDetails,
         apiKey
     );
+};
+
+export const searchIssues = async (
+    term: string,
+    opts?: { teamId?: string; first?: number; includeArchived?: boolean; apiKey?: string }
+): Promise<LinearIssueSearchResponse> => {
+    const normalizedTerm = String(term ?? '').trim();
+    if (!normalizedTerm) return { success: true, totalCount: 0, nodes: [] };
+
+    return safeExecute(
+        async () => {
+            const client = getLinearClient(opts?.apiKey);
+            const result = await client.searchIssues(normalizedTerm, {
+                first: opts?.first ?? 10,
+                teamId: opts?.teamId,
+                includeArchived: opts?.includeArchived ?? false
+            });
+            const nodes: LinearIssueSearchHit[] = result.nodes.map((issue) => ({
+                id: issue.id,
+                identifier: issue.identifier,
+                title: issue.title,
+                url: issue.url,
+                priority: issue.priority,
+                priorityLabel: issue.priorityLabel,
+                stateId: issue.stateId,
+                teamId: issue.teamId,
+                projectId: issue.projectId,
+                assigneeId: issue.assigneeId
+            }));
+            return { success: true, totalCount: result.totalCount, nodes };
+        },
+        {
+            success: true,
+            totalCount: 1,
+            nodes: [
+                {
+                    id: 'mock-issue-' + Date.now(),
+                    identifier: 'MOCK-1',
+                    title: 'Mock Issue',
+                    url: 'http://localhost/mock',
+                    priority: 3,
+                    priorityLabel: 'Normal',
+                    stateId: 'mock-state-backlog',
+                    teamId: 'mock-team-id',
+                    projectId: 'mock-proj-1',
+                    assigneeId: 'mock-user-id'
+                }
+            ]
+        },
+        opts?.apiKey
+    );
+};
+
+export const getIssueByIdOrIdentifier = async (
+    issueRef: string,
+    opts?: { teamId?: string; apiKey?: string }
+): Promise<LinearIssueDetails> => {
+    const raw = String(issueRef ?? '').trim();
+    if (!raw) {
+        throw new Error('Issue id is required');
+    }
+
+    // Prefer UUIDs when present.
+    if (isUuid(raw)) {
+        return await getIssue(raw, opts?.apiKey);
+    }
+
+    // Extract identifier from URLs or text.
+    const identifier = extractIssueIdentifierFromText(raw);
+    const term = identifier || raw;
+
+    const results = await searchIssues(term, {
+        teamId: opts?.teamId,
+        first: 10,
+        includeArchived: true,
+        apiKey: opts?.apiKey
+    });
+    if (results.nodes.length === 0) {
+        throw new Error(`No issues found for "${term}"`);
+    }
+
+    const match =
+        identifier
+            ? results.nodes.find((n) => n.identifier.toUpperCase() === identifier)
+            : results.nodes[0];
+    if (!match) {
+        throw new Error(`No issues found for "${term}"`);
+    }
+
+    // Fetch full details when the best match isn't a UUID.
+    // The search result doesn't contain all fields (e.g. description), so pull the full issue by id.
+    return await getIssue(match.id, opts?.apiKey);
 };
 
 // --- Projects ---

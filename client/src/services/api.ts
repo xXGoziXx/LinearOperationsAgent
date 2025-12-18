@@ -34,8 +34,12 @@ api.interceptors.response.use(
     }
 );
 
-export const sendAgentMessage = async (message: string, teamId?: string) => {
-    const response = await api.post('/agent', { message, teamId });
+export const sendAgentMessage = async (
+    message: string,
+    teamId?: string,
+    history?: Array<{ role: 'user' | 'assistant'; content: string }>
+) => {
+    const response = await api.post('/agent', { message, teamId, history });
     return response.data;
 };
 

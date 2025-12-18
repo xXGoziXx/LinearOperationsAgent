@@ -38,17 +38,25 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived, 
         setIsLoading(true);
 
         try {
-            const response = await sendAgentMessage(userMsg.content, selectedTeamId);
+            const history = messages
+                .slice(-20)
+                .map((msg) => ({ role: msg.role, content: msg.content }));
+            const response = await sendAgentMessage(userMsg.content, selectedTeamId, history);
+            const isActionPlan =
+                response?.status === 'pending' &&
+                typeof response?.agent?.action === 'string' &&
+                response.agent.action !== 'error' &&
+                response.agent.action !== 'message';
 
             const botMsg: Message = {
                 id: (Date.now() + 1).toString(),
                 role: 'assistant',
                 content: response.agent.message || "I've prepared a plan. Please review it in the inspector.",
-                data: response
+                ...(isActionPlan ? { data: response } : {})
             };
 
             setMessages(prev => [...prev, botMsg]);
-            if (response) {
+            if (isActionPlan) {
                 onActionReceived(response);
             }
 
@@ -65,8 +73,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived, 
     };
 
     return (
-        <div className="flex flex-col h-full bg-slate-900 rounded-xl overflow-hidden shadow-2xl border border-slate-700">
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        <div className="flex flex-col h-full min-h-0 bg-slate-900 rounded-xl overflow-hidden shadow-2xl border border-slate-700">
+            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
                 {messages.length === 0 && (
                     <div className="text-center text-slate-500 mt-10">
                         <Bot className="w-12 h-12 mx-auto mb-2 opacity-50" />

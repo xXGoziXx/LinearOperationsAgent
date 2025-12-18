@@ -146,8 +146,11 @@ export type AgentAction =
     | 'createProject'
     | 'updateProject'
     | 'createRoadmap'
+    | 'readIssue'
+    | 'searchIssues'
     | 'readProject'
     | 'readRoadmap'
+    | 'message'
     | 'error';
 
 export interface CreateIssueResponse {
@@ -186,6 +189,18 @@ export interface CreateRoadmapResponse {
     message?: string;
 }
 
+export interface ReadIssueResponse {
+    action: 'readIssue';
+    payload: { id: string };
+    message?: string;
+}
+
+export interface SearchIssuesResponse {
+    action: 'searchIssues';
+    payload: { term: string; teamId?: string; first?: number; includeArchived?: boolean };
+    message?: string;
+}
+
 export interface ReadProjectResponse {
     action: 'readProject';
     payload: { id: string };
@@ -196,6 +211,12 @@ export interface ReadRoadmapResponse {
     action: 'readRoadmap';
     payload: { id: string };
     message?: string;
+}
+
+export interface MessageResponse {
+    action: 'message';
+    payload: Record<string, never>;
+    message: string;
 }
 
 export interface ErrorResponse {
@@ -211,9 +232,53 @@ export type AgentResponse =
     | CreateProjectResponse
     | UpdateProjectResponse
     | CreateRoadmapResponse
+    | ReadIssueResponse
+    | SearchIssuesResponse
     | ReadProjectResponse
     | ReadRoadmapResponse
+    | MessageResponse
     | ErrorResponse;
+
+// ============================================================================
+// Linear Read/Search Response Types
+// ============================================================================
+
+export interface LinearIssueDetails {
+    success: true;
+    id: string;
+    identifier: string;
+    title: string;
+    description?: string;
+    url: string;
+    priority?: number;
+    priorityLabel?: string;
+    labelIds?: string[];
+    assigneeId?: string;
+    stateId?: string;
+    cycleId?: string;
+    projectId?: string;
+    projectMilestoneId?: string;
+    teamId?: string;
+}
+
+export interface LinearIssueSearchHit {
+    id: string;
+    identifier: string;
+    title: string;
+    url: string;
+    priority?: number;
+    priorityLabel?: string;
+    stateId?: string;
+    teamId?: string;
+    projectId?: string;
+    assigneeId?: string;
+}
+
+export interface LinearIssueSearchResponse {
+    success: true;
+    totalCount: number;
+    nodes: LinearIssueSearchHit[];
+}
 
 // ============================================================================
 // File Upload Response Types

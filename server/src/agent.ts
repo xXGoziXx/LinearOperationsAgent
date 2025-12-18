@@ -22,6 +22,11 @@ CONTEXT:
 You may be provided with "ALLOWED_OPTIONS" containing the specific IDs for Projects, Cycles, Labels, and States available in the current team.
 
 RULES:
+0. RESPONSE SHAPE (CRITICAL): Always return a JSON object with keys "action" and "payload".
+   - If the user is chatting (not requesting a Linear operation) OR you need clarification, return: { "action": "message", "payload": {}, "message": "<your reply>" }.
+   - Use { "action": "error", "payload": {}, "message": "<reason>" } only for real failures (invalid/unsupported request, malformed output, etc.).
+   - Do NOT return a message-only object.
+
 1. ID ENFORCEMENT: For any field where you have ALLOWED_OPTIONS (projectId, cycleId, labelIds, stateId), you MUST use a valid ID from that list.
    - Do NOT use names for these fields.
    - Do NOT invent IDs.
@@ -45,18 +50,98 @@ RULES:
 6. RELATIONSHIPS:
     - If setting 'projectMilestoneId', you MUST also set 'projectId'.
     - 'labelIds' must be an array of strings.
+    - For issue references, you may use either the UUID id or the human identifier (e.g. "ENG-123") in fields named 'id'.
+
+7. READING DATA (IMPORTANT):
+   - If the user asks a question about an existing Linear issue (status, summary, “what is X about”), use action 'readIssue' with { id }.
+   - If the user asks to find/search/list issues, use action 'searchIssues' with { term, teamId?, first? }.
 
 Supported Actions:
 - createIssue: { teamId, title, description, priority, projectId, projectMilestoneId, labelIds, assigneeId, stateId, cycleId }
 - updateIssue: { id, ...updates }
 - deleteIssue: { id }
+- readIssue: { id }  // id may be UUID or identifier like ENG-123
+- searchIssues: { term, teamId?, first? } // use term like "login" or "ENG-123"
 - createProject: { name, teamIds, state, leadId }
 - updateProject: { id, ...updates }
+- message: { } (no-op chat response)
 
 Return ONLY raw JSON.
 `;
 
-export const processUserQuery = async (query: string, context?: { teamId?: string; metadata?: TeamMetadata, linearKey?: string, openAIKey?: string }): Promise<AgentResponse> => {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+const VALID_AGENT_ACTIONS = new Set([
+    'createIssue',
+    'updateIssue',
+    'deleteIssue',
+    'createProject',
+    'updateProject',
+    'createRoadmap',
+    'readIssue',
+    'searchIssues',
+    'readProject',
+    'readRoadmap',
+    'message',
+    'error'
+]);
+
+function coerceAgentResponse(value: unknown): AgentResponse {
+    if (!isPlainObject(value)) {
+        return { action: 'error', payload: {}, message: 'Invalid AI response (not an object).' };
+    }
+
+    const action = value.action;
+    const message =
+        typeof value.message === 'string' && value.message.trim().length > 0 ? value.message : undefined;
+
+    if (typeof action !== 'string' || !VALID_AGENT_ACTIONS.has(action)) {
+        return {
+            action: 'error',
+            payload: {},
+            message: message || 'AI did not return a valid action.'
+        };
+    }
+
+    const payload =
+        'payload' in value && isPlainObject(value.payload) ? (value.payload as Record<string, unknown>) : undefined;
+
+    if (action === 'error') {
+        // "error" from the model usually means "no operation" or "need clarification" — treat as a chat message.
+        return { action: 'message', payload: {}, message: message || 'No actionable operation detected.' };
+    }
+
+    if (action === 'message') {
+        return { action: 'message', payload: {}, message: message || 'How can I help?' };
+    }
+
+    if (!payload) {
+        return {
+            action: 'error',
+            payload: {},
+            message: message || 'AI did not return a valid payload.'
+        };
+    }
+
+    return {
+        action: action as AgentResponse['action'],
+        payload: payload as AgentResponse['payload'],
+        ...(message ? { message } : {})
+    } as AgentResponse;
+}
+
+export const processUserQuery = async (
+    query: string,
+    context?: {
+        teamId?: string;
+        metadata?: TeamMetadata;
+        linearKey?: string;
+        openAIKey?: string;
+        history?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    }
+): Promise<AgentResponse> => {
 
     const openAiApiKey = context?.openAIKey || process.env.OPENAI_API_KEY;
     if (!openAiApiKey) throw new Error("OpenAI API Key not provided");
@@ -66,10 +151,17 @@ export const processUserQuery = async (query: string, context?: { teamId?: strin
     try {
         const metadataStr = context?.metadata ? JSON.stringify(context.metadata, null, 2) : "No metadata available.";
 
+        const history = Array.isArray(context?.history) ? context.history : [];
+        const safeHistory = history
+            .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+            .slice(-20)
+            .map((m) => ({ role: m.role, content: m.content }));
+
         const completion = await openai.chat.completions.create({
             model: "gpt-5-mini",
             messages: [
                 { role: "system", content: `${SYSTEM_PROMPT}\n\nALLOWED_OPTIONS = ${metadataStr}` },
+                ...safeHistory,
                 { role: "user", content: query }
             ],
             response_format: { type: "json_object" }
@@ -79,7 +171,7 @@ export const processUserQuery = async (query: string, context?: { teamId?: strin
         if (!content) throw new Error("No content from AI");
 
         const parsed = JSON.parse(content);
-        return parsed as AgentResponse;
+        return coerceAgentResponse(parsed);
 
     } catch (error) {
         console.error("AI Error:", error);

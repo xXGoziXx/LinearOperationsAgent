@@ -221,6 +221,21 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
     // If we have an agent response but status is pending, show verification
     const isPending = rootStatus === 'pending' || (agent && !result && !localData.status); // fallback check
     const isError = agent?.action === 'error' || (result && typeof result === 'object' && 'error' in result);
+    const hasValidAgentAction = typeof agent?.action === 'string' && agent.action.trim().length > 0;
+    const isInspectableAgentAction =
+        hasValidAgentAction && agent?.action !== 'error' && agent?.action !== 'message';
+    const safeAgentPayload: AgentActionPayload =
+        agent && agent.payload && typeof agent.payload === 'object' && !Array.isArray(agent.payload)
+            ? agent.payload
+            : {};
+    const agentSubtitle =
+        (typeof safeAgentPayload.title === 'string' && safeAgentPayload.title.trim().length > 0
+            ? safeAgentPayload.title
+            : (typeof safeAgentPayload.name === 'string' && safeAgentPayload.name.trim().length > 0
+                ? safeAgentPayload.name
+                : (typeof agent?.message === 'string' && agent.message.trim().length > 0 ? agent.message : 'Click to view details')));
+    const isExecutablePending =
+        isPending && hasValidAgentAction && agent?.action !== 'error' && agent?.action !== 'message';
 
     const handleSingleAccept = async (payloadOverride?: AgentActionPayload) => {
         if (!agent) return;
@@ -253,7 +268,7 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                     <Terminal size={18} className="text-accent" />
                     <h3 className="font-semibold text-slate-200">Action Inspector</h3>
                 </div>
-                {isPending && agent?.action !== 'error' && (
+                {isExecutablePending && (
                     <div className="flex gap-2">
                         <span className="text-xs text-yellow-500 font-bold self-center mr-2 uppercase tracking-wider">Reviewing</span>
                     </div>
@@ -264,18 +279,21 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
 
                 {agent && (
                     <div
-                        className={`bg-slate-950 rounded-lg border transition-all cursor-pointer hover:bg-slate-900 ${isPending ? 'border-yellow-500/30 hover:border-yellow-500/50' :
+                        className={`bg-slate-950 rounded-lg border transition-all hover:bg-slate-900 ${isInspectableAgentAction ? 'cursor-pointer' : 'cursor-default'} ${isPending ? 'border-yellow-500/30 hover:border-yellow-500/50' :
                             isError ? 'border-red-500/30 hover:border-red-500/50' :
                                 'border-emerald-500/30 hover:border-emerald-500/50'
                             }`}
-                        onClick={() => setSelectedItem({ action: agent.action, payload: agent.payload, status: rootStatus || 'pending' })}
+                        onClick={() => {
+                            if (!isInspectableAgentAction) return;
+                            setSelectedItem({ action: agent.action, payload: safeAgentPayload, status: rootStatus || 'pending' });
+                        }}
                     >
                         <div className="flex items-center justify-between p-3">
                             <div className="flex items-center gap-3 flex-1 min-w-0">
                                 <ChevronRight size={16} className="text-slate-500 flex-shrink-0" />
                                 <div className="flex flex-col min-w-0 flex-1">
                                     <div className="flex items-center gap-2">
-                                        <span className="text-sm text-purple-400 font-semibold">{agent.action}</span>
+                                        <span className="text-sm text-purple-400 font-semibold">{isInspectableAgentAction ? agent.action : 'message'}</span>
                                         <span className={`text-xs font-bold px-2 py-0.5 rounded ${rootStatus === 'success' ? 'bg-emerald-500/20 text-emerald-400' :
                                             rootStatus === 'failed' || isError ? 'bg-red-500/20 text-red-400' :
                                                 'bg-yellow-500/20 text-yellow-400'
@@ -284,11 +302,11 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                                         </span>
                                     </div>
                                     <span className="text-xs text-slate-500 truncate">
-                                        {('title' in agent.payload && typeof agent.payload.title === 'string' ? agent.payload.title : '') || ('name' in agent.payload && typeof agent.payload.name === 'string' ? agent.payload.name : '') || 'Click to view details'}
+                                        {agentSubtitle}
                                     </span>
                                 </div>
                             </div>
-                            {isPending && agent.action !== 'error' && (
+                            {isExecutablePending && (
                                 <div className="flex gap-1 ml-2" onClick={(e) => e.stopPropagation()}>
                                     <button
                                         onClick={handleSingleDecline}
@@ -341,11 +359,11 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                                 return { ...prev, payload: updatedPayload };
                             });
                         }}
-                        onAccept={isPending && agent?.action !== 'error' ? async (payloadOverride) => {
+                        onAccept={isPending && agent?.action !== 'error' && agent?.action !== 'message' ? async (payloadOverride) => {
                             await handleSingleAccept(payloadOverride);
                             setSelectedItem(null);
                         } : undefined}
-                        onDecline={isPending && agent?.action !== 'error' ? () => {
+                        onDecline={isPending && agent?.action !== 'error' && agent?.action !== 'message' ? () => {
                             handleSingleDecline();
                             setSelectedItem(null);
                         } : undefined}
