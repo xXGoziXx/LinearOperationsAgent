@@ -2,12 +2,46 @@ import { Router } from 'express';
 import * as Agent from './agent';
 import * as LinearService from './linear';
 import multer from 'multer';
+import {
+    AgentResponse,
+    IssueCreateInput,
+    IssueUpdateInput,
+    ProjectCreateInput,
+    ProjectUpdateInput,
+    toLinearState,
+    IssuePayloadWithHelpers,
+    ProjectPayloadWithHelpers
+} from './types';
 
 const router = Router();
 const upload = multer(); // Memory storage
 
-    router.post('/agent', async (req, res) => {
-    const { message } = req.body;
+// Helper to get keys
+const getKeys = (req: any) => ({
+    linearKey: req.headers['x-linear-api-key'] as string | undefined,
+    openAIKey: req.headers['x-openai-api-key'] as string | undefined
+});
+
+router.post('/agent', async (req, res) => {
+    const { message, teamId } = req.body;
+    const { linearKey, openAIKey } = getKeys(req);
+
+    let metadata;
+    if (teamId) {
+        try {
+            metadata = await LinearService.getTeamMetadata(teamId, { apiKey: linearKey });
+        } catch (e) {
+            console.warn(`Failed to fetch metadata for team ${teamId}`, e);
+        }
+    } else {
+        // Fallback: Try to get default team to provide *some* context
+        const defTeam = await LinearService.getFirstTeam({ apiKey: linearKey });
+        if (defTeam) {
+            try {
+                metadata = await LinearService.getTeamMetadata(defTeam.id, { apiKey: linearKey });
+            } catch (e) {}
+        }
+    }
 
     if (!message) {
         return res.status(400).json({ error: "Message is required" });
@@ -15,8 +49,84 @@ const upload = multer(); // Memory storage
 
     try {
         // 1. Get Intent from AI
-        const agentResponse = await Agent.processUserQuery(message);
-        console.log("Agent Plan:", agentResponse);
+        const agentResponse = await Agent.processUserQuery(message, {
+            teamId,
+            metadata,
+            linearKey,
+            openAIKey
+        });
+
+	        // Normalize preview payload (keeps UI consistent with execution-time sanitization).
+	        try {
+	            if ((agentResponse.action === 'createIssue' || agentResponse.action === 'updateIssue') && agentResponse.payload) {
+	                const p = agentResponse.payload as any;
+
+                let extractedPhase: string | undefined;
+                let phaseStrippedDescription: string | undefined;
+
+                if (typeof p.title === 'string' && typeof p.description === 'string') {
+                    p.description = LinearService.stripTitleFromDescription(p.title, p.description) ?? p.description;
+                }
+
+                if (typeof p.description === 'string') {
+                    const { phase, description } = LinearService.extractPhaseAndStripFromDescription(p.description);
+                    extractedPhase = phase;
+                    if (typeof description === 'string') phaseStrippedDescription = description;
+                }
+
+                const normalizedPriority = LinearService.normalizeIssuePriority(
+                    p.priority,
+                    typeof p.description === 'string' ? p.description : undefined,
+                    p.projectMilestoneName || p.milestoneName || p.phase || extractedPhase
+                );
+                if (normalizedPriority !== undefined) {
+                    p.priority = normalizedPriority;
+                }
+
+                const milestoneHint =
+                    p.projectMilestoneName || p.milestoneName || p.phase || extractedPhase;
+
+                if (!p.projectMilestoneId && typeof p.projectId === 'string' && typeof milestoneHint === 'string' && milestoneHint.trim().length > 0) {
+                    const milestones = await LinearService.getProjectMilestones(p.projectId, { apiKey: linearKey });
+                    const match = LinearService.findProjectMilestoneMatch(milestones, milestoneHint);
+                    if (match) {
+                        p.projectMilestoneId = match.id;
+                        p.projectMilestoneName = match.name;
+                    }
+                }
+
+                // Remove the Phase line if a milestone is set/resolved.
+	                if (p.projectMilestoneId && typeof phaseStrippedDescription === 'string') {
+	                    p.description = phaseStrippedDescription;
+	                }
+	            }
+	            if ((agentResponse.action === 'createProject' || agentResponse.action === 'updateProject') && agentResponse.payload) {
+	                const p = agentResponse.payload as any;
+
+	                if (typeof p.title === 'string' && typeof p.name !== 'string') {
+	                    p.name = p.title;
+	                }
+
+	                const projectTitle =
+	                    typeof p.name === 'string'
+	                        ? p.name
+	                        : (typeof p.title === 'string' ? p.title : undefined);
+
+	                if (typeof projectTitle === 'string' && typeof p.description === 'string') {
+	                    p.description = LinearService.stripTitleFromDescription(projectTitle, p.description) ?? p.description;
+	                }
+
+	                // Best-effort defaulting: ensure teamIds for createProject if a team is selected.
+	                if (agentResponse.action === 'createProject') {
+	                    if (!Array.isArray(p.teamIds) || p.teamIds.length === 0) {
+	                        if (typeof teamId === 'string' && teamId.trim().length > 0) {
+	                            p.teamIds = [teamId];
+	                        }
+	                    }
+	                }
+	            }
+	        } catch {}
+	        console.log("Agent Plan:", agentResponse);
 
         // ALWAYS return the plan, do not execute yet
         res.json({
@@ -25,25 +135,48 @@ const upload = multer(); // Memory storage
             status: 'pending'
         });
 
-    } catch (error) {
+    } catch (error: any) {
         console.error("Route Error:", error);
-        res.status(500).json({ error: "Internal Server Error" });
+        res.status(500).json({ error: error.message || "Internal Server Error" });
     }
 });
 
 router.post('/execute', async (req, res) => {
     const { action, payload, batch } = req.body;
+    const { linearKey } = getKeys(req);
+
+    const getClientErrorStatus = (error: unknown): number => {
+        const e = error as any;
+        const userError =
+            e?.type === 'InvalidInput' ||
+            e?.type === 'GraphqlError' ||
+            (Array.isArray(e?.errors) && e.errors.some((x: any) => x?.userError === true));
+        if (userError) return 400;
+
+        const status = e?.status;
+        if (typeof status === 'number' && status >= 400 && status < 600) return status;
+        return 500;
+    };
+
+    const getClientErrorMessage = (error: unknown): string => {
+        const e = error as any;
+        const msgFromLinear = e?.errors?.[0]?.message;
+        if (typeof msgFromLinear === 'string' && msgFromLinear.trim().length > 0) return msgFromLinear;
+        const msg = e?.message;
+        if (typeof msg === 'string' && msg.trim().length > 0) return msg;
+        return 'Execution failed';
+    };
 
     // Handle Batch Execution
     if (batch && Array.isArray(batch)) {
         const results = [];
         for (const item of batch) {
             try {
-                const result = await executeLinearAction(item.action, item.payload);
+                const result = await executeLinearAction(item.action, item.payload, linearKey);
                 results.push({ ...item, status: 'success', data: result });
-            } catch (e: any) {
+            } catch (e) {
                 console.error(`Batch Execution Error (${item.action}):`, e);
-                results.push({ ...item, status: 'failed', error: e.message });
+                results.push({ ...item, status: 'failed', error: getClientErrorMessage(e) });
             }
         }
         return res.json({ results });
@@ -55,33 +188,70 @@ router.post('/execute', async (req, res) => {
     }
 
     try {
-        const result = await executeLinearAction(action, payload);
+        const result = await executeLinearAction(action, payload, linearKey);
         res.json({ status: 'success', data: result });
-    } catch (error: any) {
+    } catch (error) {
         console.error("Execution Error:", error);
-        res.status(500).json({ error: error.message || "Execution failed" });
+        res.status(getClientErrorStatus(error)).json({ error: getClientErrorMessage(error) });
     }
 });
 
 // Helper to execute single linear action
-async function executeLinearAction(action: string, payload: any) {
+type ActionPayload =
+    | IssueCreateInput
+    | IssueUpdateInput
+    | ProjectCreateInput
+    | ProjectUpdateInput
+    | { id: string }
+    | { name: string }
+    | { error?: string };
+
+async function executeLinearAction(action: string, payload: ActionPayload, apiKey?: string) {
     switch (action) {
         case 'createIssue':
-            return await LinearService.createIssue(payload);
-        case 'updateIssue':
-            return await LinearService.updateIssue(payload.id, payload);
-        case 'deleteIssue':
-            return await LinearService.deleteIssue(payload.id);
-        case 'createProject':
-            return await LinearService.createProject(payload);
-        case 'createRoadmap':
-            return await LinearService.createRoadmap(payload);
-        case 'readProject':
-            return await LinearService.getProject(payload.id);
-        case 'readRoadmap':
-            return await LinearService.getRoadmap(payload.id);
-        case 'error':
-            throw new Error(payload.error || "Agent returned error action");
+            return await LinearService.createIssue(payload as IssueCreateInput, apiKey);
+        case 'updateIssue': {
+            const p = payload as IssueUpdateInput;
+            return await LinearService.updateIssue(p, apiKey);
+        }
+        case 'deleteIssue': {
+            const p = payload as { id: string };
+            return await LinearService.deleteIssue(p.id, apiKey);
+        }
+        case 'createProject': {
+            const p = payload as ProjectCreateInput;
+            // Transform state before calling Linear API
+            const transformedPayload = {
+                ...p,
+                state: toLinearState(p.state)
+            };
+            return await LinearService.createProject(transformedPayload, { apiKey });
+        }
+        case 'updateProject': {
+            const p = payload as ProjectUpdateInput;
+            // Transform state before calling Linear API
+            const transformedPayload = {
+                ...p,
+                state: toLinearState(p.state)
+            };
+            return await LinearService.updateProject(p.id, transformedPayload, { apiKey });
+        }
+        case 'createRoadmap': {
+            const p = payload as { name: string };
+            return await LinearService.createRoadmap(p, { apiKey });
+        }
+        case 'readProject': {
+            const p = payload as { id: string };
+            return await LinearService.getProject(p.id, { apiKey });
+        }
+        case 'readRoadmap': {
+            const p = payload as { id: string };
+            return await LinearService.getRoadmap(p.id, { apiKey });
+        }
+        case 'error': {
+            const p = payload as { error?: string };
+            throw new Error(p.error || "Agent returned error action");
+        }
         default:
             throw new Error(`Unknown action: ${action}`);
     }
@@ -89,12 +259,37 @@ async function executeLinearAction(action: string, payload: any) {
 
 
 router.get('/teams', async (req, res) => {
+    const { linearKey } = getKeys(req);
     try {
-        const teams = await LinearService.getTeams();
+        const teams = await LinearService.getTeams({ apiKey: linearKey });
         res.json(teams);
     } catch (error) {
         console.error("Get Teams Error:", error);
         res.status(500).json({ error: "Failed to fetch teams" });
+    }
+});
+
+router.get('/team/:teamId/metadata', async (req, res) => {
+    try {
+        const { teamId } = req.params;
+        const { linearKey } = getKeys(req);
+        const metadata = await LinearService.getTeamMetadata(teamId, { apiKey: linearKey });
+        res.json(metadata);
+    } catch (error) {
+        console.error("Get Metadata Error:", error);
+        res.status(500).json({ error: "Failed to fetch team metadata" });
+    }
+});
+
+router.get('/project/:projectId/milestones', async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        const { linearKey } = getKeys(req);
+        const milestones = await LinearService.getProjectMilestones(projectId, { apiKey: linearKey });
+        res.json({ nodes: milestones });
+    } catch (error) {
+        console.error("Get Milestones Error:", error);
+        res.status(500).json({ error: "Failed to fetch project milestones" });
     }
 });
 
@@ -103,28 +298,41 @@ router.post('/upload', upload.array('files'), async (req, res) => {
         return res.status(400).json({ error: "No files uploaded" });
     }
 
+    const { linearKey, openAIKey } = getKeys(req);
     const files = req.files as Express.Multer.File[];
     const providedTeamId = req.body.teamId;
 
     const plannedActions = [];
 
     try {
-        // Pre-fetch context once for efficiency
-        const users = await LinearService.getUsers();
+        const users = await LinearService.getUsers(linearKey);
 
+        // Resolve default team
         let defaultTeam;
-
         if (providedTeamId) {
-            defaultTeam = { id: providedTeamId };
+             defaultTeam = { id: providedTeamId };
         } else {
-            const specificTeam = await LinearService.getTeamByName("Voice App - Tech");
-            const fallbackTeam = await LinearService.getFirstTeam();
-            defaultTeam = specificTeam || fallbackTeam;
+             const fallbackTeam = await LinearService.getFirstTeam({ apiKey: linearKey });
+             defaultTeam = fallbackTeam;
         }
 
         for (const file of files) {
             const fileContent = file.buffer.toString('utf-8');
-            const agentResult = await Agent.handleFileUpload(fileContent);
+
+            let metadata;
+            const targetTeamId = providedTeamId || defaultTeam?.id;
+            if (targetTeamId) {
+                try {
+                    metadata = await LinearService.getTeamMetadata(targetTeamId, { apiKey: linearKey });
+                } catch (e) { console.warn("Metadata fetch failed", e); }
+            }
+
+            const agentResult = await Agent.handleFileUpload(fileContent, {
+                teamId: targetTeamId,
+                metadata,
+                linearKey,
+                openAIKey
+            });
 
             if (!agentResult) {
                 plannedActions.push({ file: file.originalname, status: 'skipped', reason: 'No actionable content found' });
@@ -135,21 +343,40 @@ router.post('/upload', upload.array('files'), async (req, res) => {
 
             try {
                 // Common sanitization & resolver logic (Moved from execution to planning phase)
-                const cleanPayload = { ...payload };
-                // Remove helper fields before sending to Linear (we use them for ID lookup first)
-                delete cleanPayload.assigneeName;
-                delete cleanPayload.teamName;
-                delete cleanPayload.labelNames;
-                delete cleanPayload.leadName;
+                const cleanPayload: Record<string, unknown> = { ...payload };
+	                // Remove helper fields before sending to Linear (we use them for ID lookup first)
+	                delete cleanPayload.assigneeName;
+	                delete cleanPayload.teamName;
+	                delete cleanPayload.labelNames;
+	                delete cleanPayload.leadName;
+	                delete cleanPayload.projectMilestoneName;
+	                delete cleanPayload.milestoneName;
+	                delete cleanPayload.phase;
 
-                if (action === 'createIssue' || action === 'updateIssue') {
-                    // --- ISSUE LOGIC ---
-                    const issue = payload; // working copy for lookups
+	                if (action === 'createIssue' || action === 'updateIssue') {
+	                    // --- ISSUE LOGIC ---
+	                    const issue = payload as IssuePayloadWithHelpers; // working copy for lookups
+
+	                    // Strip redundant title from description; phase is removed only if we can resolve a milestone.
+	                    let extractedPhase: string | undefined;
+	                    let phaseStrippedDescription: string | undefined;
+	                    if (typeof issue.title === 'string' && typeof issue.description === 'string') {
+	                        const stripped = LinearService.stripTitleFromDescription(issue.title, issue.description);
+	                        if (typeof stripped === 'string') {
+	                            issue.description = stripped;
+	                            cleanPayload.description = stripped;
+	                        }
+	                    }
+	                    if (typeof issue.description === 'string') {
+	                        const { phase, description } = LinearService.extractPhaseAndStripFromDescription(issue.description);
+	                        extractedPhase = phase;
+	                        if (typeof description === 'string') phaseStrippedDescription = description;
+	                    }
 
                     // 1. Resolve Team (Only for create)
                     if (action === 'createIssue' && !issue.teamId) {
-                         if (defaultTeam) {
-                            cleanPayload.teamId = defaultTeam.id;
+	                         if (defaultTeam) {
+	                            cleanPayload.teamId = defaultTeam.id;
                          } else {
                              // If we can't resolve team, we can't plan accurately.
                              // We could leave it empty and let execution fail, or fail here.
@@ -160,39 +387,110 @@ router.post('/upload', upload.array('files'), async (req, res) => {
 
                     // 2. Resolve Assignee
                     if (issue.assigneeName && users && users.nodes) {
-                        const match = users.nodes.find((u: any) =>
-                            u.name.toLowerCase().includes(issue.assigneeName.toLowerCase()) ||
-                            u.displayName.toLowerCase().includes(issue.assigneeName.toLowerCase())
+                        const assigneeName = issue.assigneeName;
+                        const match = users.nodes.find((u: { name: string; displayName: string }) =>
+                            u.name.toLowerCase().includes(assigneeName.toLowerCase()) ||
+                            u.displayName.toLowerCase().includes(assigneeName.toLowerCase())
                         );
                         if (match) {
-                            cleanPayload.assigneeId = match.id;
+                            cleanPayload.assigneeId = (match as { id: string }).id;
                         }
                     }
 
-                    // 3. Resolve Priority
-                    if (issue.priority) {
-                        const pMap: Record<string, number> = {
-                            "urgent": 1, "p1": 1,
-                            "high": 2, "p2": 2,
-                            "normal": 3, "p3": 3,
-                            "low": 4, "p4": 4,
-                            "none": 0, "nopriority": 0
-                        };
-                        const pKey = String(issue.priority).toLowerCase().replace(/\s/g, '');
-                        if (pMap[pKey] !== undefined) {
-                            cleanPayload.priority = pMap[pKey];
-                        } else if (typeof issue.priority === 'string') {
-                            const parsed = parseInt(issue.priority);
-                            cleanPayload.priority = isNaN(parsed) ? 0 : parsed;
+                    // 4. Resolve Labels
+                    if (issue.labelNames && issue.labelNames.length > 0 && metadata && metadata.labels) {
+                        const labelIds: string[] = [];
+                        const keptLabelNames: string[] = [];
+                        const usedParentIds = new Set<string>();
+                        for (const name of issue.labelNames) {
+                             const match = metadata.labels.find((l: { name: string, id: string; parentId?: string }) => l.name.toLowerCase() === name.toLowerCase());
+                             if (!match) continue;
+                             if (match.parentId) {
+                                 if (usedParentIds.has(match.parentId)) continue;
+                                 usedParentIds.add(match.parentId);
+                             }
+                             labelIds.push(match.id);
+                             keptLabelNames.push(match.name);
+                        }
+                        if (labelIds.length > 0) {
+                            cleanPayload.labelIds = labelIds;
+                        }
+                        // Keep the preview label list consistent with what we resolved.
+                        if (keptLabelNames.length > 0) {
+                            issue.labelNames = keptLabelNames;
                         }
                     }
+
+                    // Enforce label-group exclusivity even if labelIds were provided directly by the AI.
+                    if (Array.isArray(cleanPayload.labelIds) && metadata?.labels) {
+                        const { labelIds: nextLabelIds } = LinearService.enforceExclusiveChildLabelIds(
+                            cleanPayload.labelIds as string[],
+                            metadata.labels
+                        );
+                        cleanPayload.labelIds = nextLabelIds;
+                    }
+
+	                    // 5. Resolve Project
+	                    if ((issue.projectName || issue.project) && metadata && metadata.projects) {
+	                        const projName = issue.projectName || issue.project; // flexible check
+	                        if (typeof projName === 'string') {
+	                             const match = metadata.projects.find((p: { name: string, id: string }) => p.name.toLowerCase().includes(projName.toLowerCase()));
+	                             if (match) {
+	                                 cleanPayload.projectId = match.id;
+	                             }
+	                        }
+	                    }
+
+	                    // 6. Resolve Project Milestone (best effort via extracted phase/milestone name)
+	                    const milestoneHint =
+	                        issue.projectMilestoneName || issue.milestoneName || issue.phase || extractedPhase;
+	                    if (!cleanPayload.projectMilestoneId && typeof cleanPayload.projectId === 'string' && typeof milestoneHint === 'string' && milestoneHint.trim().length > 0) {
+	                        try {
+	                            const milestones = await LinearService.getProjectMilestones(cleanPayload.projectId, { apiKey: linearKey });
+	                            const match = LinearService.findProjectMilestoneMatch(milestones, milestoneHint);
+	                            if (match) {
+	                                cleanPayload.projectMilestoneId = match.id;
+	                                issue.projectMilestoneName = match.name; // for preview/UI
+	                            }
+	                        } catch (e) {}
+	                    }
+
+	                    // Now that milestone resolution is done, remove the Phase line if a milestone is set.
+	                    if (typeof cleanPayload.projectMilestoneId === 'string' && cleanPayload.projectMilestoneId && typeof phaseStrippedDescription === 'string') {
+	                        issue.description = phaseStrippedDescription;
+	                        cleanPayload.description = phaseStrippedDescription;
+	                    }
+
+	                    // 3. Resolve Priority (Linear: 0 none, 1 urgent, 2 high, 3 normal, 4 low)
+	                    const normalizedPriority = LinearService.normalizeIssuePriority(
+	                        issue.priority,
+	                        typeof issue.description === 'string' ? issue.description : undefined,
+	                        issue.projectMilestoneName || issue.milestoneName || issue.phase || extractedPhase
+	                    );
+	                    if (normalizedPriority !== undefined) {
+	                        cleanPayload.priority = normalizedPriority;
+	                        issue.priority = normalizedPriority;
+	                    }
 
                 } else if (action === 'createProject') {
                     // --- PROJECT LOGIC ---
-                    const project = payload;
+                    const project = payload as ProjectPayloadWithHelpers;
 
                     if (cleanPayload.title && !cleanPayload.name) {
                         cleanPayload.name = cleanPayload.title;
+                    }
+
+                    // Strip redundant title header from project descriptions (best effort).
+                    const projectTitle =
+                        typeof cleanPayload.name === 'string'
+                            ? cleanPayload.name
+                            : (typeof cleanPayload.title === 'string' ? cleanPayload.title : undefined);
+                    if (typeof projectTitle === 'string' && typeof cleanPayload.description === 'string') {
+                        const stripped = LinearService.stripTitleFromDescription(projectTitle, cleanPayload.description);
+                        if (typeof stripped === 'string') {
+                            cleanPayload.description = stripped;
+                            project.description = stripped;
+                        }
                     }
 
                     if (!project.teamIds || project.teamIds.length === 0) {
@@ -202,12 +500,13 @@ router.post('/upload', upload.array('files'), async (req, res) => {
                     }
 
                     if (project.leadName && users && users.nodes) {
-                        const match = users.nodes.find((u: any) =>
-                            u.name.toLowerCase().includes(project.leadName.toLowerCase()) ||
-                            u.displayName.toLowerCase().includes(project.leadName.toLowerCase())
+                        const leadName = project.leadName;
+                        const match = users.nodes.find((u: { name: string; displayName: string }) =>
+                            u.name.toLowerCase().includes(leadName.toLowerCase()) ||
+                            u.displayName.toLowerCase().includes(leadName.toLowerCase())
                         );
                         if (match) {
-                            cleanPayload.leadId = match.id;
+                            cleanPayload.leadId = (match as { id: string }).id;
                         }
                     }
                 }

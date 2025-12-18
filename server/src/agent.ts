@@ -1,6 +1,13 @@
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 import * as LinearService from './linear';
+import {
+    AgentResponse,
+    FileUploadResponse,
+    IssueCreateInput,
+    LINEAR_PROJECT_STATES,
+    TeamMetadata
+} from './types';
 
 dotenv.config();
 
@@ -8,55 +15,61 @@ const apiKey = process.env.OPENAI_API_KEY;
 
 const openai = apiKey ? new OpenAI({ apiKey }) : null;
 
-export interface AgentResponse {
-    action: string;
-    payload: any;
-    message?: string;
-}
-
 const SYSTEM_PROMPT = `
 You are an AI Linear Operations Agent. Convert user natural language into structured JSON describing the correct Linear API operations.
-Never hallucinate project IDs or labels—if not provided, ask for them or use reasonable defaults if instructed? actually better to omit optional fields if unknown.
+
+CONTEXT:
+You may be provided with "ALLOWED_OPTIONS" containing the specific IDs for Projects, Cycles, Labels, and States available in the current team.
+
+RULES:
+1. ID ENFORCEMENT: For any field where you have ALLOWED_OPTIONS (projectId, cycleId, labelIds, stateId), you MUST use a valid ID from that list.
+   - Do NOT use names for these fields.
+   - Do NOT invent IDs.
+   - If the user asks for "Bug" label, look up the ID for "Bug" in ALLOWED_OPTIONS.labels.
+   - If you cannot find a matching ID, omit the field or ask for clarification (only if critical).
+
+2. PROJECT STATES: Use "started" for In Progress. Valid: backlog, planned, started, paused, completed, canceled.
+
+3. LABEL GROUPS (IMPORTANT): Some labels are child labels under a label group (they will share the same \`parentId\` / \`parentName\` in ALLOWED_OPTIONS.labels).
+   - You MUST NOT apply more than one child label from the same group to an issue.
+   - If multiple child labels from the same group seem relevant, pick the single best match and omit the others.
+
+4. PRIORITY (IMPORTANT): Linear priority is numeric:
+   - 0 = No priority, 1 = Urgent, 2 = High, 3 = Normal, 4 = Low.
+   - If you see P0/P1/P2/P3 used as priority codes, map them to 1/2/3/4 respectively (P0 is highest).
+
+5. DESCRIPTION (IMPORTANT):
+   - Do NOT repeat the title inside the description (no leading "# <title>" header).
+   - Do NOT include a "**Phase:**" line in the description; use a milestone field instead.
+
+6. RELATIONSHIPS:
+    - If setting 'projectMilestoneId', you MUST also set 'projectId'.
+    - 'labelIds' must be an array of strings.
 
 Supported Actions:
-- createIssue: { teamId, title, description, priority, projectId, labelIds, assigneeId, state }
+- createIssue: { teamId, title, description, priority, projectId, projectMilestoneId, labelIds, assigneeId, stateId, cycleId }
 - updateIssue: { id, ...updates }
 - deleteIssue: { id }
-- createProject: { name, teamIds }
+- createProject: { name, teamIds, state, leadId }
 - updateProject: { id, ...updates }
-- createRoadmap: { name, teamId }
-- readProject: { id }
-- readRoadmap: { id }
-- assignMetadata: { assigneeName, labelNames } (Helper to resolve names before actions)
 
-Return ONLY raw JSON, no markdown formatting.
-Format:
-{
-  "action": "createIssue",
-  "payload": { ... }
-}
+Return ONLY raw JSON.
 `;
 
-export const processUserQuery = async (query: string): Promise<AgentResponse> => {
-    if (!openai) {
-        // Mock response if no API key
-        console.warn("No OpenAI Key, returning mock response");
-        return {
-            action: 'createIssue',
-            payload: {
-                teamId: 'team_MOCK',
-                title: `Mock Issue from: ${query.substring(0, 20)}...`,
-                description: 'This is a mock issue generated because no OpenAI key was found.'
-            },
-            message: "Generated mock response (no AI key)."
-        };
-    }
+export const processUserQuery = async (query: string, context?: { teamId?: string; metadata?: TeamMetadata, linearKey?: string, openAIKey?: string }): Promise<AgentResponse> => {
+
+    const openAiApiKey = context?.openAIKey || process.env.OPENAI_API_KEY;
+    if (!openAiApiKey) throw new Error("OpenAI API Key not provided");
+
+    const openai = new OpenAI({ apiKey: openAiApiKey });
 
     try {
+        const metadataStr = context?.metadata ? JSON.stringify(context.metadata, null, 2) : "No metadata available.";
+
         const completion = await openai.chat.completions.create({
-            model: "gpt-4o",
+            model: "gpt-5-mini",
             messages: [
-                { role: "system", content: SYSTEM_PROMPT },
+                { role: "system", content: `${SYSTEM_PROMPT}\n\nALLOWED_OPTIONS = ${metadataStr}` },
                 { role: "user", content: query }
             ],
             response_format: { type: "json_object" }
@@ -70,44 +83,63 @@ export const processUserQuery = async (query: string): Promise<AgentResponse> =>
 
     } catch (error) {
         console.error("AI Error:", error);
-        return { action: 'error', payload: {}, message: "Failed to process query." };
+        const errorMessage = error instanceof Error ? error.message : "Failed to process query.";
+        return { action: 'error', payload: {}, message: errorMessage };
     }
 };
 
-export const handleFileUpload = async (fileContent: string): Promise<{ action: 'createIssue' | 'updateIssue' | 'createProject' | 'updateProject', payload: any } | null> => {
+export const handleFileUpload = async (fileContent: string, context: { teamId?: string; metadata?: TeamMetadata, linearKey?: string, openAIKey?: string }): Promise<AgentResponse | null> => {
     if (!openai) {
-        return { action: 'createIssue', payload: { title: "Mock File Issue", description: "From file upload (no AI)" } };
+        const mockPayload: IssueCreateInput = {
+            teamId: 'team_MOCK',
+            title: "Mock File Issue",
+            description: "From file upload (no AI)"
+        };
+        return { action: 'createIssue', payload: mockPayload };
     }
 
     const FILE_PROMPT = `
     You are an AI assistant processing a file upload for Linear.
-    Your goal is to extract EXACTLY ONE action from this file: 'createIssue', 'updateIssue', or 'createProject'.
+    Your goal is to extract EXACTLY ONE action from this file: 'createIssue', 'updateIssue', 'createProject', or 'updateProject'.
 
-    Rules for Action Selection:
-    1. 'createProject': If the file defines a broad initiative, "Project", "PRD", "Epic", or scope with multiple sub-components (e.g. "Phase 1", "Milestone", "Feature Slices").
-    2. 'createIssue': If the file describes a specific, actionable task, bug, or feature request.
-    3. 'updateIssue': If the file mentions an existing Issue ID (e.g. LIN-123) and changes to it.
-    4. 'updateProject': If the file mentions an existing Project ID (e.g. PROJ-123) and changes to it.
+    Action selection (VERY IMPORTANT):
+    - Default to 'createIssue' when uncertain.
+    - Do NOT choose 'createProject' just because the file contains words like "project", "PRD", "epic", or "phase".
+    - Only choose 'createProject' when the file clearly describes a multi-issue initiative (a container) with multiple workstreams/slices/milestones.
 
-    Payload Extraction:
-    - Issues: title, priority, assigneeName, labelNames.
-    - Projects: name, teamIds, state (planning/started/paused), leadName (if mentioned).
+    Strong signals for 'createProject' (need multiple signals, not just one):
+    - There are multiple independent slices/workstreams/features (2+ distinct deliverables).
+    - The doc has project-governance sections like: "Goals & Success Metrics", "In Scope", "Out of Scope", "Feature Slices", "Rollout", "Launch Criteria", "Risks", "Dependencies & Sequencing".
+    - The doc includes phases/milestones/roadmap/timeline planning that implies multiple issues.
 
-    CRITICAL: The 'description' field MUST follow the allowed Markdown structure relative to the action:
+    Strong signals for 'createIssue':
+    - The doc describes ONE primary deliverable (a bug fix, a feature, a task).
+    - It has issue-structured sections like: "Acceptance Criteria", "Steps to Reproduce", "Expected vs Actual", "Implementation", "QA Notes".
+    - It reads like a single ticket, even if it's a long spec.
 
-    [TEMPLATE FOR 'createProject']
+    Existing entity updates (only if explicitly referenced):
+    - Use 'updateIssue' ONLY if the file clearly references an existing issue identifier and the intent is to modify it.
+    - Use 'updateProject' ONLY if the file clearly references an existing project and the intent is to modify it.
+
+    Payload extraction:
+    - Issues: title, description, priority, assigneeName, labelNames, projectName, projectMilestoneName (preferred when phase/milestone is mentioned).
+    - Projects: name, description, teamIds, state (MUST be one of: backlog/planned/started/paused/completed/canceled), leadName (if mentioned).
+    - IMPORTANT: If you include multiple labels, do not include more than one child label from the same label group (e.g. only one of "Back-End" vs "Front-End – Mobile" if they are in the same group).
+    - IMPORTANT: Do not include the title/name as a markdown header in the description (no leading "# <title>").
+    - IMPORTANT: Linear priority is numeric (0 none, 1 urgent, 2 high, 3 normal, 4 low). If you infer P0/P1/P2/P3 as priority codes, map them to 1/2/3/4.
+    - IMPORTANT: If the file mentions a Phase/Milestone, set it as projectMilestoneName (string) in the payload, not inside the description.
+
+    CRITICAL: For project state, use "started" NOT "inProgress". Valid states are: backlog, planned, started, paused, completed, canceled.
+
+    Description templates (guidance; preserve original content when possible):
+
+    [TEMPLATE FOR 'createProject' description]
     """
-    # <Project title — Phase code + name>
-
     ## Overview
     <Why this project exists and the core problem it solves>
 
     ## Goals & Success Metrics
     - <Metric name: target>
-    - <More measurable goals covering conversion, quality, reliability, etc.>
-
-    ## Target Users & Jobs-to-be-Done
-    - <Key user segments and their jobs>
 
     ## In Scope
     - <Features or workstreams included in this phase>
@@ -120,34 +152,15 @@ export const handleFileUpload = async (fileContent: string): Promise<{ action: '
        - Requirements: <Functional/technical expectations>
        - Acceptance: <Observable outcome proving the slice is complete>
 
-    ## User Flows & States
-    - <Happy-path walkthrough from start to finish>
-    - <Edge cases or alternate states the flow must handle>
-
     ## Dependencies & Sequencing
     - <External systems, teams, or prior work this project relies on>
 
-    ## Non-Functional Requirements
-    - <Performance, security, accessibility, or operational constraints>
-
-    ## Analytics & Experimentation
-    - <Events, dashboards, and experiments required to measure success>
-
     ## Rollout & Launch Criteria
     - <Gating steps, test phases, and launch-readiness checks>
-
-    ## Open Questions & Risks
-    - <Outstanding decisions and risk mitigations>
     """
 
-    [TEMPLATE FOR 'createIssue']
+    [TEMPLATE FOR 'createIssue' description]
     """
-    # <Title of the initiative>
-
-    **Phase:** <Phase name and code>
-    **Epic:** <Epic identifier>
-    **Goal Alignment:** <Tie back to broader goals>
-
     ## Problem
     <Why this work matters; current gaps or risks>
 
@@ -156,12 +169,6 @@ export const handleFileUpload = async (fileContent: string): Promise<{ action: '
 
     ## Acceptance Criteria
     - <Bullet list of observable outcomes or tests>
-
-    ## Dependencies
-    - <List of upstream/downstream work or resources>
-
-    ## Metrics & Instrumentation
-    - <How success will be measured>
 
     ## Notes
     - <Links, references, extra context>
@@ -177,11 +184,13 @@ export const handleFileUpload = async (fileContent: string): Promise<{ action: '
     ${fileContent}
     `;
 
+    const metadataStr = context?.metadata ? JSON.stringify(context.metadata, null, 2) : "No metadata available.";
+
     try {
         const completion = await openai.chat.completions.create({
-            model: "gpt-4-turbo",
+            model: "gpt-5-mini",
             messages: [
-                { role: "system", content: "You are a data extraction assistant. Output valid JSON only." },
+                { role: "system", content: `You are a data extraction assistant. Output valid JSON only.\n\nCONTEXT: If helpful, here are valid IDs for the team:\nALLOWED_OPTIONS = ${metadataStr}` },
                 { role: "user", content: FILE_PROMPT }
             ],
              response_format: { type: "json_object" }
@@ -201,4 +210,34 @@ export const handleFileUpload = async (fileContent: string): Promise<{ action: '
          console.error("File Parse Error:", error);
          return null;
     }
+};
+
+// This block is added based on the user's instruction to pass `context.linearKey` to LinearService calls.
+// It is assumed this logic would reside in a function that processes the AI's output (AgentResponse or FileUploadResponse)
+// and then interacts with the Linear API.
+// The original document did not contain this processing logic, so it's added as a new, separate function.
+export const executeLinearActions = async (actions: { action: string; data: any }[], context?: { teamId?: string; linearKey?: string }) => {
+    const results = [];
+    for (const action of actions) {
+        if (action.action === 'createIssue') {
+            // Enforce teamId from context if missing
+            if (context?.teamId && !action.data.teamId) {
+                action.data.teamId = context.teamId;
+            }
+            const res = await LinearService.createIssue(action.data, context?.linearKey);
+            results.push({ ...res, action: 'createIssue' });
+        } else if (action.action === 'updateIssue') {
+            const res = await LinearService.updateIssue(action.data, context?.linearKey);
+            results.push({ ...res, action: 'updateIssue' });
+        } else if (action.action === 'createProject') {
+                // Enforce teamId
+                if (context?.teamId && (!action.data.teamIds || action.data.teamIds.length === 0)) {
+                action.data.teamIds = [context.teamId];
+            }
+            const res = await LinearService.createProject(action.data, { apiKey: context?.linearKey });
+            results.push({ ...res, action: 'createProject' });
+        }
+        // Add other actions like deleteIssue, updateProject if needed
+    }
+    return results;
 };

@@ -13,9 +13,10 @@ interface Message {
 
 interface ChatInterfaceProps {
     onActionReceived: (data: ApiResponse) => void;
+    selectedTeamId: string;
 }
 
-export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived }) => {
+export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived, selectedTeamId }) => {
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
@@ -37,7 +38,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived }
         setIsLoading(true);
 
         try {
-            const response = await sendAgentMessage(userMsg.content);
+            const response = await sendAgentMessage(userMsg.content, selectedTeamId);
 
             const botMsg: Message = {
                 id: (Date.now() + 1).toString(),
@@ -73,6 +74,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived }
                         <p className="text-sm">Ask me to create issues, projects, or upload a file.</p>
                     </div>
                 )}
+
                 {messages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                         <div className={`max-w-[80%] rounded-lg p-3 ${msg.role === 'user'

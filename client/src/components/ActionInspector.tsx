@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Terminal, CheckCircle, XCircle, Activity, Play, Ban, CheckCheck, XSquare, Loader2, ChevronRight } from 'lucide-react';
-import { executeAction, executeBatch } from '../services/api';
+import { executeAction, executeBatch, type ExecutableBatchItem } from '../services/api';
 import type { AgentActionPayload, ApiResponse, BatchItem } from '../types/agent';
 import { IssueModal } from './IssueModal';
 
@@ -41,7 +41,13 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                 const pendingItems = localData.results.filter(r => r.status === 'pending');
                 if (pendingItems.length === 0) return;
 
-                const res = await executeBatch(pendingItems);
+                const executablePendingItems: ExecutableBatchItem[] = pendingItems
+                    .filter((batchItem): batchItem is BatchItem & { action: string; payload: AgentActionPayload } => {
+                        return typeof batchItem.action === 'string' && !!batchItem.payload;
+                    })
+                    .map(batchItem => ({ action: batchItem.action, payload: batchItem.payload }));
+
+                const res = await executeBatch(executablePendingItems);
 
                 // Update local state with results
                 const updatedResults = localData.results.map(item => {
@@ -65,7 +71,7 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
             setLocalData({ ...localData, results: updatedResults });
         };
 
-        const handleSingleAction = async (index: number, type: 'accept' | 'decline') => {
+        const handleSingleAction = async (index: number, type: 'accept' | 'decline', payloadOverride?: AgentActionPayload) => {
             if (!localData.results) return;
             const item = localData.results[index];
 
@@ -80,10 +86,11 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
             setExecuting(true);
             try {
                 if (!item.action || !item.payload) return;
-                const res = await executeAction(item.action, item.payload);
+                const payloadToUse = payloadOverride ?? item.payload;
+                const res = await executeAction(item.action, payloadToUse);
 
                 const newResults = [...localData.results];
-                newResults[index] = { ...item, status: 'success', data: res.data };
+                newResults[index] = { ...item, payload: payloadToUse, status: 'success', data: res.data };
                 setLocalData({ ...localData, results: newResults });
 
             } catch (e: unknown) {
@@ -174,26 +181,38 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                         </div>
                     ))}
                 </div>
-                <IssueModal
-                    isOpen={!!selectedItem && 'file' in selectedItem}
-                    onClose={() => setSelectedItem(null)}
-                    item={selectedItem as BatchItem}
-                    onAccept={selectedItem && 'file' in selectedItem ? async () => {
-                        const idx = results.findIndex(r => r === selectedItem);
-                        if (idx !== -1) {
-                            await handleSingleAction(idx, 'accept');
-                            setSelectedItem(null);
-                        }
-                    } : undefined}
-                    onDecline={selectedItem && 'file' in selectedItem ? () => {
-                        const idx = results.findIndex(r => r === selectedItem);
-                        if (idx !== -1) {
-                            handleSingleAction(idx, 'decline');
-                            setSelectedItem(null);
-                        }
-                    } : undefined}
-                    executing={executing}
-                />
+                {selectedItem && 'file' in selectedItem && (
+                    <IssueModal
+                        isOpen={true}
+                        onClose={() => setSelectedItem(null)}
+                        item={selectedItem as BatchItem}
+                        onSave={(updatedPayload) => {
+                            if (!localData.results) return;
+                            const idx = localData.results.findIndex(r => r === selectedItem);
+                            if (idx === -1) return;
+                            const updatedItem = { ...localData.results[idx], payload: updatedPayload };
+                            const newResults = [...localData.results];
+                            newResults[idx] = updatedItem;
+                            setLocalData({ ...localData, results: newResults });
+                            setSelectedItem(updatedItem);
+                        }}
+                        onAccept={async (payloadOverride) => {
+                            const idx = results.findIndex(r => r === selectedItem);
+                            if (idx !== -1) {
+                                await handleSingleAction(idx, 'accept', payloadOverride ?? (selectedItem as BatchItem).payload);
+                                setSelectedItem(null);
+                            }
+                        }}
+                        onDecline={() => {
+                            const idx = results.findIndex(r => r === selectedItem);
+                            if (idx !== -1) {
+                                handleSingleAction(idx, 'decline');
+                                setSelectedItem(null);
+                            }
+                        }}
+                        executing={executing}
+                    />
+                )}
             </div>
         );
     }
@@ -201,16 +220,23 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
     // --- SINGLE ACTION LOGIC ---
     // If we have an agent response but status is pending, show verification
     const isPending = rootStatus === 'pending' || (agent && !result && !localData.status); // fallback check
-    const isError = agent?.action === 'error' || (result as any)?.error;
+    const isError = agent?.action === 'error' || (result && typeof result === 'object' && 'error' in result);
 
-    const handleSingleAccept = async () => {
+    const handleSingleAccept = async (payloadOverride?: AgentActionPayload) => {
         if (!agent) return;
         setExecuting(true);
         try {
-            const res = await executeAction(agent.action, agent.payload);
-            setLocalData({ ...localData, result: res.data, status: 'success' });
-        } catch (e: any) {
-            setLocalData({ ...localData, result: { error: e.message }, status: 'failed' });
+            const payloadToUse = payloadOverride ?? agent.payload;
+            const res = await executeAction(agent.action, payloadToUse);
+            setLocalData((prev) => {
+                if (!prev || !prev.agent) return prev;
+                return { ...prev, agent: { ...prev.agent, payload: payloadToUse }, result: res.data, status: 'success' };
+            });
+        } catch (e: unknown) {
+            setLocalData((prev) => {
+                if (!prev) return prev;
+                return { ...prev, result: { error: e instanceof Error ? e.message : 'Unknown error' }, status: 'failed' };
+            });
         } finally {
             setExecuting(false);
         }
@@ -239,8 +265,8 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                 {agent && (
                     <div
                         className={`bg-slate-950 rounded-lg border transition-all cursor-pointer hover:bg-slate-900 ${isPending ? 'border-yellow-500/30 hover:border-yellow-500/50' :
-                                isError ? 'border-red-500/30 hover:border-red-500/50' :
-                                    'border-emerald-500/30 hover:border-emerald-500/50'
+                            isError ? 'border-red-500/30 hover:border-red-500/50' :
+                                'border-emerald-500/30 hover:border-emerald-500/50'
                             }`}
                         onClick={() => setSelectedItem({ action: agent.action, payload: agent.payload, status: rootStatus || 'pending' })}
                     >
@@ -251,14 +277,14 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                                     <div className="flex items-center gap-2">
                                         <span className="text-sm text-purple-400 font-semibold">{agent.action}</span>
                                         <span className={`text-xs font-bold px-2 py-0.5 rounded ${rootStatus === 'success' ? 'bg-emerald-500/20 text-emerald-400' :
-                                                rootStatus === 'failed' || isError ? 'bg-red-500/20 text-red-400' :
-                                                    'bg-yellow-500/20 text-yellow-400'
+                                            rootStatus === 'failed' || isError ? 'bg-red-500/20 text-red-400' :
+                                                'bg-yellow-500/20 text-yellow-400'
                                             }`}>
                                             {rootStatus?.toUpperCase() || 'PENDING'}
                                         </span>
                                     </div>
                                     <span className="text-xs text-slate-500 truncate">
-                                        {(agent.payload as any)?.title || (agent.payload as any)?.name || 'Click to view details'}
+                                        {('title' in agent.payload && typeof agent.payload.title === 'string' ? agent.payload.title : '') || ('name' in agent.payload && typeof agent.payload.name === 'string' ? agent.payload.name : '') || 'Click to view details'}
                                     </span>
                                 </div>
                             </div>
@@ -272,7 +298,7 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                                         <Ban size={14} />
                                     </button>
                                     <button
-                                        onClick={handleSingleAccept}
+                                        onClick={() => void handleSingleAccept()}
                                         className="p-1.5 hover:bg-emerald-500/20 text-emerald-400 rounded transition-colors"
                                         title="Accept"
                                         disabled={executing}
@@ -286,7 +312,7 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                 )}
 
                 {/* Post-Execution Result */}
-                {result && (
+                {result !== undefined && result !== null && (
                     <div className={`bg-slate-950 rounded-lg p-4 border ${isError ? 'border-red-900/50' : 'border-emerald-900/50'}`}>
                         <div className="flex items-center gap-2 mb-2">
                             {isError ? <XCircle size={16} className="text-red-500" /> : <CheckCircle size={16} className="text-emerald-500" />}
@@ -300,20 +326,32 @@ export const ActionInspector: React.FC<ActionInspectorProps> = ({ data }) => {
                     </div>
                 )}
 
-                <IssueModal
-                    isOpen={!!selectedItem && !('file' in selectedItem)}
-                    onClose={() => setSelectedItem(null)}
-                    item={selectedItem as { action: string; payload: any; status: string }}
-                    onAccept={isPending && agent?.action !== 'error' ? async () => {
-                        await handleSingleAccept();
-                        setSelectedItem(null);
-                    } : undefined}
-                    onDecline={isPending && agent?.action !== 'error' ? () => {
-                        handleSingleDecline();
-                        setSelectedItem(null);
-                    } : undefined}
-                    executing={executing}
-                />
+                {selectedItem && !('file' in selectedItem) && (
+                    <IssueModal
+                        isOpen={true}
+                        onClose={() => setSelectedItem(null)}
+                        item={selectedItem as { action: string; payload: AgentActionPayload; status: string }}
+                        onSave={(updatedPayload) => {
+                            setLocalData((prev) => {
+                                if (!prev || !prev.agent) return prev;
+                                return { ...prev, agent: { ...prev.agent, payload: updatedPayload } };
+                            });
+                            setSelectedItem((prev) => {
+                                if (!prev || 'file' in prev) return prev;
+                                return { ...prev, payload: updatedPayload };
+                            });
+                        }}
+                        onAccept={isPending && agent?.action !== 'error' ? async (payloadOverride) => {
+                            await handleSingleAccept(payloadOverride);
+                            setSelectedItem(null);
+                        } : undefined}
+                        onDecline={isPending && agent?.action !== 'error' ? () => {
+                            handleSingleDecline();
+                            setSelectedItem(null);
+                        } : undefined}
+                        executing={executing}
+                    />
+                )}
             </div>
         </div>
     );

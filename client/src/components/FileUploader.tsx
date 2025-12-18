@@ -1,43 +1,19 @@
-import React, { useState, useEffect } from 'react';
-import { Upload, FileText, Check, AlertCircle, Users } from 'lucide-react';
-import { uploadFile, getTeams } from '../services/api';
+import React, { useState } from 'react';
+import { Upload, FileText, Check, AlertCircle } from 'lucide-react';
+import { uploadFile } from '../services/api';
 import type { ApiResponse } from '../types/agent';
 
-interface Team {
-    id: string;
-    name: string;
-}
+
 
 interface FileUploaderProps {
     onActionReceived?: (data: ApiResponse) => void;
+    selectedTeamId: string;
 }
 
-export const FileUploader: React.FC<FileUploaderProps> = ({ onActionReceived }) => {
+export const FileUploader: React.FC<FileUploaderProps> = ({ onActionReceived, selectedTeamId }) => {
     const [uploading, setUploading] = useState(false);
     const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
     const [statusMsg, setStatusMsg] = useState('');
-    const [teams, setTeams] = useState<Team[]>([]);
-    const [selectedTeamId, setSelectedTeamId] = useState<string>('');
-
-    useEffect(() => {
-        const fetchTeams = async () => {
-            try {
-                const res = await getTeams();
-                if (res && res.nodes) {
-                    setTeams(res.nodes);
-                    // Default to first one if available
-                    if (res.nodes.length > 0) {
-                        // Look for "Voice App - Tech" preference or just first
-                        const pref = res.nodes.find((t: Team) => t.name.includes("Voice App"));
-                        setSelectedTeamId(pref ? pref.id : res.nodes[0].id);
-                    }
-                }
-            } catch (e) {
-                console.error("Failed to fetch teams", e);
-            }
-        };
-        fetchTeams();
-    }, []);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const files = e.target.files;
@@ -74,26 +50,6 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onActionReceived }) 
             <h3 className="text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
                 <FileText size={16} /> Batch Import Issues and Projects
             </h3>
-
-            <div className="mb-4">
-                <label htmlFor="team-select" className="text-xs text-slate-400 mb-1 block flex items-center gap-1">
-                    <Users size={12} /> Target Team
-                </label>
-                <select
-                    id="team-select"
-                    value={selectedTeamId}
-                    onChange={(e) => setSelectedTeamId(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-600 text-slate-300 text-sm rounded-md p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    disabled={uploading || teams.length === 0}
-                >
-                    {teams.length === 0 && <option>Loading teams...</option>}
-                    {teams.map((t) => (
-                        <option key={t.id} value={t.id}>
-                            {t.name}
-                        </option>
-                    ))}
-                </select>
-            </div>
 
             <div className="relative">
                 <input

@@ -26,6 +26,7 @@ export interface BatchItem {
     data?: unknown; // The execution result
     error?: string;
     reason?: string;
+    originalPayload?: AgentActionPayload; // Friendly names from AI
 }
 
 export interface ApiResponse {

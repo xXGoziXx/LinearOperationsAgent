@@ -1,0 +1,19 @@
+{
+  "name": "linear-operations-agent",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "start:client": "cd client && npm run dev",
+    "start:server": "cd server && npm run dev",
+    "start": "concurrently \"npm run start:client\" \"npm run start:server\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "vite": "^7.2.4",
+    "tsx": "^4.19.1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.17.1"
+}
