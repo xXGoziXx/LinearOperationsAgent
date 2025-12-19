@@ -48,6 +48,11 @@ export const getTeams = async () => {
     return response.data;
 };
 
+export const getOrganization = async () => {
+    const response = await api.get('/organization');
+    return response.data;
+};
+
 export const getTeamMetadata = async (teamId: string) => {
     const response = await api.get(`/team/${teamId}/metadata`);
     return response.data;

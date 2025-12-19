@@ -1,19 +1,29 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChatInterface } from './components/ChatInterface';
 import { ActionInspector } from './components/ActionInspector';
 import { FileUploader } from './components/FileUploader';
 import { SettingsModal } from './components/SettingsModal';
-import { getTeams, getTeamMetadata } from './services/api';
+import { getOrganization, getTeams, getTeamMetadata } from './services/api';
 import { Zap, Settings as SettingsIcon } from 'lucide-react';
 import type { ApiResponse } from './types/agent';
 
 function App() {
   const [latestAction, setLatestAction] = useState<ApiResponse | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [organizationName, setOrganizationName] = useState<string>('');
 
   // Global Team State
   const [teams, setTeams] = useState<Array<{ id: string, name: string }>>([]);
   const [selectedTeamId, setSelectedTeamId] = useState<string>('');
+
+  useEffect(() => {
+    getOrganization()
+      .then((org) => {
+        const name = org && typeof org === 'object' && 'name' in (org as any) ? (org as any).name : '';
+        if (typeof name === 'string') setOrganizationName(name);
+      })
+      .catch(() => setOrganizationName(''));
+  }, []);
 
   // Fetch teams on mount
   useState(() => {
@@ -35,7 +45,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 p-6 flex flex-col gap-6 text-slate-200">
+    <div className="min-h-screen lg:h-screen bg-slate-950 p-6 flex flex-col gap-6 text-slate-200 lg:overflow-hidden">
       {/* Header */}
       <header className="flex items-center justify-between px-2">
         <div className="flex items-center gap-3">
@@ -50,7 +60,15 @@ function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 flex-wrap justify-end">
+          <div
+            className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded-full border border-slate-700 max-w-[320px]"
+            title={organizationName ? `Workspace: ${organizationName}` : 'Workspace'}
+          >
+            <span className="text-xs text-slate-400">Workspace:</span>
+            <span className="text-xs text-slate-200 truncate">{organizationName || '—'}</span>
+          </div>
+
           {/* Global Team Selector */}
           <div className="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded-full border border-slate-700">
             <span className="text-xs text-slate-400">Target Team:</span>
@@ -76,8 +94,8 @@ function App() {
         </div>
       </header>
 
-        {/* Main Content Info Grid */}
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-140px)]">
+      {/* Main Content Info Grid */}
+      <main className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-3 gap-6">
 
         {/* Left Column: Chat */}
         <div className="lg:col-span-2 h-full min-h-0">
@@ -85,7 +103,7 @@ function App() {
         </div>
 
         {/* Right Column: Tools & Inspector */}
-        <div className="flex flex-col gap-6 h-full">
+        <div className="flex flex-col gap-6 h-full min-h-0">
           {/* File Upload Section */}
           <div className="flex-none">
             <FileUploader onActionReceived={setLatestAction} selectedTeamId={selectedTeamId} />

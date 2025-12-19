@@ -434,6 +434,17 @@ router.get('/teams', async (req, res) => {
     }
 });
 
+router.get('/organization', async (req, res) => {
+    const { linearKey } = getKeys(req);
+    try {
+        const org = await LinearService.getOrganization(linearKey);
+        res.json(org);
+    } catch (error: any) {
+        console.error("Get Organization Error:", error);
+        res.status(500).json({ error: error?.message || "Failed to fetch organization" });
+    }
+});
+
 router.get('/team/:teamId/metadata', async (req, res) => {
     try {
         const { teamId } = req.params;

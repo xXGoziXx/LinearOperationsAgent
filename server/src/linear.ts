@@ -1052,3 +1052,18 @@ export const getUsers = async (apiKey?: string) => {
         apiKey
     );
 };
+
+// --- Organization (Workspace) ---
+
+export const getOrganization = async (apiKey?: string): Promise<{ id: string; name: string; urlKey?: string }> => {
+    return safeExecute(
+        async () => {
+            const client = getLinearClient(apiKey);
+            const viewer = await client.viewer;
+            const org = await viewer.organization;
+            return { id: org.id, name: org.name, urlKey: org.urlKey };
+        },
+        { id: 'mock-org-id', name: 'Mock Workspace', urlKey: 'mock' },
+        apiKey
+    );
+};
