@@ -1,6 +1,6 @@
 # AI Linear Operations Agent
 
-A production-ready web application that allows users to interact with Linear using natural language and file uploads. Built with React (Vite) and Node.js (Express).
+A production-ready web application that allows users to interact with Linear using natural language and file uploads. Built with Next.js (Pages Router), React, and TypeScript.
 
 ## Features
 
@@ -13,56 +13,67 @@ A production-ready web application that allows users to interact with Linear usi
 ## Prerequisites
 
 - Node.js (v18+)
+- pnpm (v10+)
 - Linear API Key
 - OpenAI API Key
 
 ## Setup
 
-1. **Clone & Install Dependencies**
+1. **Install Dependencies**
    ```bash
-   # Install root/client/server dependencies
-   cd server && npm install
-   cd ../client && npm install
+   pnpm install
    ```
 
 2. **Configure Environment**
-   Create a `.env` file in `server/` (or root if running together, but server reads it):
+   Create a `.env.local` file in the root directory:
    ```bash
-   cp .env.example server/.env
+   cp .env.local.example .env.local
    ```
-   Edit `server/.env` and add your keys:
+   Edit `.env.local` and add your keys:
    ```env
    LINEAR_API_KEY=lin_api_...
    OPENAI_API_KEY=sk-...
    ```
 
-3. **Run the Application**
+   Note: API keys can also be set in the browser settings modal (stored in localStorage).
 
-   **Backend:**
+3. **Run the Application**
    ```bash
-   cd server
-   npm run dev
+   pnpm dev
    # Runs on http://localhost:3000
    ```
 
-   **Frontend:**
+4. **Build for Production**
    ```bash
-   cd client
-   npm run dev
-   # Runs on http://localhost:5173
+   pnpm build
+   pnpm start
    ```
-
-4. **Verify**
-   Open the frontend URL. You should see the Chat Interface.
 
 ## Usage
 
 - **Create an Issue**: Type "Create a high priority bug for the Mobile App project regarding crash on login."
-- **Upload Issues**: Drag a `.md` file with issue details into the upload area.
+- **Upload Issues**: Drag a `.md` or `.json` file with issue details into the upload area.
 - **View Actions**: Watch the panel on the right to see the executed Linear mutations.
 
 ## Architecture
 
-- **Client**: React, Typescript, Vite, Tailwind CSS, Lucide Icons.
-- **Server**: Express, Typescript, OpenAI SDK, @linear/sdk.
-- **Agent**: Server-side logic classifies intent and generates structured payloads.
+- **Framework**: Next.js 15 with Pages Router
+- **Frontend**: React 19, TypeScript, Tailwind CSS, Lucide Icons
+- **Backend**: Next.js API Routes, OpenAI SDK, @linear/sdk
+- **Agent**: Server-side logic classifies intent and generates structured payloads
+
+## Project Structure
+
+```
+├── pages/
+│   ├── api/          # API route handlers
+│   ├── _app.tsx      # Root app component
+│   └── index.tsx     # Home page
+├── components/       # React components
+├── lib/             # Shared utilities and services
+│   ├── agent.ts      # OpenAI agent logic
+│   ├── linear.ts     # Linear SDK integration
+│   ├── types.ts      # TypeScript types
+│   └── api.ts        # API client
+└── styles/          # Global styles
+```
