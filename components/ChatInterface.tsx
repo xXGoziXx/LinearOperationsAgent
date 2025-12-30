@@ -73,12 +73,12 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived, 
     };
 
     return (
-        <div className="flex flex-col h-full min-h-0 bg-slate-900 rounded-xl overflow-hidden shadow-2xl border border-slate-700">
-            <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
+        <div className="flex flex-col h-full min-h-0 overflow-hidden border shadow-2xl bg-slate-900 rounded-xl border-slate-700">
+            <div className="flex-1 min-h-0 p-4 space-y-4 overflow-y-auto">
                 {messages.length === 0 && (
-                    <div className="text-center text-slate-500 mt-10">
+                    <div className="mt-10 text-center text-slate-500">
                         <Bot className="w-12 h-12 mx-auto mb-2 opacity-50" />
-                        <p>Hello! I'm your Linear Agent.</p>
+                        <p>Hello! I&apos;m your Linear Agent.</p>
                         <p className="text-sm">Ask me to create issues, projects, or upload a file.</p>
                     </div>
                 )}
@@ -89,7 +89,7 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived, 
                             ? 'bg-indigo-600 text-white'
                             : 'bg-slate-700 text-slate-200'
                             }`}>
-                            <div className="flex items-center gap-2 mb-1 opacity-70 text-xs">
+                            <div className="flex items-center gap-2 mb-1 text-xs opacity-70">
                                 {msg.role === 'user' ? <User size={12} /> : <Bot size={12} />}
                                 <span>{msg.role === 'user' ? 'You' : 'Agent'}</span>
                             </div>
@@ -99,8 +99,8 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived, 
                 ))}
                 {isLoading && (
                     <div className="flex justify-start">
-                        <div className="bg-slate-700 rounded-lg p-3 animate-pulse">
-                            <span className="text-slate-400 text-sm">Thinking...</span>
+                        <div className="p-3 rounded-lg bg-slate-700 animate-pulse">
+                            <span className="text-sm text-slate-400">Thinking...</span>
                         </div>
                     </div>
                 )}
@@ -114,12 +114,12 @@ export const ChatInterface: React.FC<ChatInterfaceProps> = ({ onActionReceived, 
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         placeholder="Type your request (e.g. 'Create a bug for Login UI')..."
-                        className="flex-1 bg-slate-900 border border-slate-600 rounded-lg px-4 py-2 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        className="flex-1 px-4 py-2 text-white border rounded-lg bg-slate-900 border-slate-600 placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
                     <button
                         type="submit"
                         disabled={isLoading}
-                        className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg px-4 py-2 transition-colors"
+                        className="px-4 py-2 text-white transition-colors bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
                         title="Send Message"
                     >
                         <Send size={20} />
